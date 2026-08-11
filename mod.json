@@ -1,0 +1,18 @@
+{
+    "geode": "5.9.0",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "example.gmd-similarity-scanner",
+    "name": "GMD Similarity Scanner",
+    "version": "0.1.0",
+    "developer": "YourName",
+    "description": "Select a .gmd file and compare its structure against a limited set of recent online Geometry Dash levels.",
+    "dependencies": {
+        "hjfod.gmd-api": "1.5.0"
+    },
+    "tags": [
+        "utility",
+        "online"
+    ]
+}

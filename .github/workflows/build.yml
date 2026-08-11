@@ -1,0 +1,47 @@
+name: Build Geode mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  core-tests:
+    name: Core similarity tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compile standalone core tests
+        run: |
+          g++ -std=c++23 -O2 -Wall -Wextra -Wpedantic -Isrc \
+            tests/core_tests.cpp src/Similarity.cpp -o core-tests
+
+      - name: Run standalone core tests
+        run: ./core-tests
+
+  build-windows:
+    name: Windows / Geode 5.9.0
+    runs-on: windows-latest
+    needs: core-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build Geode mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          sdk: v5.9.0
+          target: Win64
+          build-config: RelWithDebInfo
+          export-pdb: true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: GMD-Similarity-Scanner-Windows
+          path: ${{ steps.build.outputs.build-output }}
+          if-no-files-found: error

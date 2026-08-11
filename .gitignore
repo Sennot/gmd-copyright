@@ -1,0 +1,9 @@
+build/
+.geode/
+*.geode
+*.dll
+*.pdb
+*.exp
+*.lib
+core-tests
+.DS_Store
