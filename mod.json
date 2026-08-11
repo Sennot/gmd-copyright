@@ -5,7 +5,7 @@
     },
     "id": "example.gmd-similarity-scanner",
     "name": "GMD Similarity Scanner",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "developer": "YourName",
     "description": "Select a .gmd file and compare its structure against a limited set of recent online Geometry Dash levels.",
     "dependencies": {

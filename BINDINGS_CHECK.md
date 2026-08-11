@@ -40,3 +40,11 @@ exact rank=1 changed rank=0.898462 partial rank=0.64375
 ## Limitation of the sandbox check
 
 A true Geode link/package build could not be completed in this sandbox because the Geode SDK/game import libraries are not installed in the runtime and ordinary outbound git cloning is unavailable. The source-level API/binding surface was checked against the current upstream Geode/GD bindings, and the included GitHub Actions workflow performs the authoritative Windows Geode 5.9.0 integration build.
+
+
+## v0.1.1 additions
+
+- Uses `geode::queueInMainThread` after a standard C++ sleep thread so `GameLevelManager::downloadLevel` is still called on the GD main thread.
+- Uses the long `FLAlertLayer::create(..., width, scroll, height, textScale)` overload to keep long result text inside a scrollable viewport.
+- Reads `GJGameLevel::m_levelLength` (plain `int` in 2.2081 bindings) only as a zero-cost coarse pre-filter.
+- Full downloads are capped at 10 and repeated download failures stop the scan early.

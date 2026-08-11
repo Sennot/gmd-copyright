@@ -311,7 +311,13 @@ SimilarityReport compare(Fingerprint const& source, Fingerprint const& candidate
     // A whole-level clone ranks mostly by overall similarity. A copied subsection
     // can still surface through bestSection, but without pretending it is a full clone.
     double wholeLevelRank = 0.80 * report.overall + 0.20 * report.coverage;
-    double partialRank = 0.55 * report.bestSection + 0.45 * report.coverage;
+
+    // A single accidental section match used to contribute too much to the rank
+    // even when coverage was zero. Scale partial matches by the amount of source
+    // structure they actually cover: a strong copied subsection still surfaces,
+    // while one random small segment no longer looks like a 20-30% match.
+    double coverageFactor = 0.35 + 0.65 * std::sqrt(report.coverage);
+    double partialRank = report.bestSection * coverageFactor;
     report.rankScore = std::max(wholeLevelRank, partialRank);
 
     return report;
