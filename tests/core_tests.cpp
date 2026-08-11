@@ -60,6 +60,19 @@ int main() {
     assert(partialReport.overall < exactReport.overall);
     assert(partialReport.coverage < exactReport.coverage);
 
+    // Regression: changing only the level header/background metadata and text
+    // contents must not change the structural fingerprint. Key 31 is deliberately
+    // ignored by the parser while ID/X/Y/rotation/scale remain unchanged.
+    auto cosmeticA = buildFingerprint(
+        "kA13,0,kS38,1;1,914,2,30,3,60,31,HELLO;1,1,2,60,3,60;"
+    );
+    auto cosmeticB = buildFingerprint(
+        "kA13,7,kS38,12;1,914,2,30,3,60,31,WORLD;1,1,2,60,3,60;"
+    );
+    auto cosmeticReport = compare(cosmeticA, cosmeticB);
+    assert(closeTo(cosmeticReport.overall, 1.0));
+    assert(closeTo(cosmeticReport.rankScore, 1.0));
+
     // Parser should ignore malformed/header records and require ID + X + Y.
     auto parsed = parseLevelData("kA13,0;1,1,2,30,3,60;1,2,2,10;garbage;");
     assert(parsed.size() == 1);

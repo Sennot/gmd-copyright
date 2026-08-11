@@ -5,14 +5,30 @@
     },
     "id": "example.gmd-similarity-scanner",
     "name": "GMD Similarity Scanner",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "developer": "YourName",
-    "description": "Select a .gmd file and compare its structure against a limited set of recent online Geometry Dash levels.",
+    "description": "Compare a .gmd level against recent online levels using metadata prefiltering, or verify one exact online Level ID.",
     "dependencies": {
         "hjfod.gmd-api": "1.5.0"
     },
     "tags": [
         "utility",
         "online"
-    ]
+    ],
+    "settings": {
+        "target-level-id": {
+            "type": "int",
+            "name": "Target Level ID",
+            "description": "0 = discover among Recent levels. Set an online Level ID to compare that exact level against the selected GMD.",
+            "default": 0,
+            "min": 0,
+            "max": 2147483647,
+            "control": {
+                "arrows": false,
+                "big-arrows": false,
+                "slider": false,
+                "input": true
+            }
+        }
+    }
 }

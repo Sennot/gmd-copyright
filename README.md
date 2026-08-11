@@ -1,12 +1,33 @@
-# GMD Similarity Scanner (MVP)
+# GMD Similarity Scanner 0.2.0
 
-A Windows Geode mod MVP that lets you select a `.gmd`, `.gmd2`, or `.lvl` file, parses it through `hjfod.gmd-api`, searches a small number of Geometry Dash **Recent** pages, collects candidate metadata, downloads only a small throttled subset, and ranks them by structural similarity.
+Windows Geode mod for comparing a local `.gmd`, `.gmd2`, or `.lvl` against online Geometry Dash levels.
 
-## Current scope
+## Two modes
 
-This is deliberately an MVP, not a global anti-piracy index. It scans only `kPagesToScan` Recent pages and caps the candidate queue. A full-server search needs a separate crawler/index/database because the official game search does not expose a server-side “similar structure” query.
+### 1. Recent discovery (default)
 
-The comparison currently uses object ID, position, rotation, scale, flips, translation normalization, 300-unit sections, multiset Jaccard similarity, and partial-section matching. Partial matches are coverage-weighted so a random match in one tiny section does not inflate the final rank. Color/group/trigger metadata is ignored by the parser for now.
+Leave **Target Level ID = 0** in the mod settings. The scanner:
+
+1. parses the selected GMD through `hjfod.gmd-api`;
+2. reads up to 12 Recent pages;
+3. collects server metadata without downloading every level;
+4. ranks candidates using `m_objectCount`, `m_levelLength`, and `m_originalLevel` when available;
+5. downloads only the 14 strongest metadata candidates, sequentially and throttled;
+6. performs the structural comparison and shows the best matches.
+
+This is still a sample of Recent uploads, not a search over the entire GD database.
+
+### 2. Exact Level ID verification
+
+Open this mod's settings in Geode and set **Target Level ID** to a known suspicious online level ID. Then press **GMD Scan** and select the source `.gmd`.
+
+In this mode the scanner skips Recent discovery and directly downloads exactly that Level ID. This is the best mode for testing whether the similarity algorithm recognizes a known copied level.
+
+Set Target Level ID back to `0` to return to discovery mode.
+
+## What the fingerprint ignores
+
+The parser currently compares placed-object structure: object ID, X/Y, rotation, scale, and flips. It intentionally ignores unrelated object properties such as text content, colors, groups, and trigger parameters. The level settings/header record is not treated as a placed object, so changing the background/header alone should not lower the structural score.
 
 ## Before publishing
 
@@ -15,60 +36,22 @@ Edit `mod.json`:
 - replace `example.gmd-similarity-scanner` with your own unique mod ID;
 - replace `YourName` with your developer name.
 
-## Build only on GitHub
+## GitHub-only build
 
-Push the repository as-is. `.github/workflows/build.yml` does two jobs:
+`.github/workflows/build.yml`:
 
-1. compiles and runs the standalone similarity tests on Ubuntu;
-2. builds the Windows `.geode` package with Geode SDK **v5.9.0** using the official `geode-sdk/build-geode-mod` action.
-
-After a successful run, download the `GMD-Similarity-Scanner-Windows` artifact from the Actions run.
-
-## Local core test (optional)
-
-The comparison engine has no Geode dependency, so it can be checked with:
-
-```bash
-g++ -std=c++23 -O2 -Wall -Wextra -Wpedantic -Isrc tests/core_tests.cpp src/Similarity.cpp -o core-tests
-./core-tests
-```
-
-## How to use in-game
-
-1. Install the built `.geode` file and its dependency `hjfod.gmd-api`.
-2. Open Geometry Dash main menu.
-3. Click **GMD Scan** at the bottom-right.
-4. Pick a `.gmd`, `.gmd2`, or `.lvl` file.
-5. The mod queries Recent pages, pre-filters the candidate pool, downloads at most 10 full levels with a 2.5-second delay between downloads, then shows results in a bounded scrollable popup.
-
-The result is a similarity signal, not a verdict that a creator stole a level.
-
-## Tunables
-
-At the top of `src/main.cpp`:
-
-- `kPagesToScan` — number of Recent pages to query;
-- `kMaxCollectedCandidates` — cap on metadata candidates collected from Recent pages;
-- `kMaxDownloadedCandidates` — hard cap on full level downloads per scan;
-- `kDownloadDelay` — pause between full level downloads;
-- `kMaxConsecutiveDownloadFailures` — abort threshold when the server starts rejecting downloads;
-- `kMaxDisplayedResults` — number of interesting results shown.
-
-In `src/Similarity.cpp`:
-
-- `kPositionQuantum` — tolerance through coordinate quantization;
-- `kRotationQuantum`;
-- `kScaleQuantum`;
-- weights inside `segmentSimilarity` and `compare`.
+1. compiles/runs standalone similarity tests on Ubuntu with warnings as errors;
+2. builds the Windows `.geode` package with Geode SDK **v5.9.0**;
+3. uploads the build artifact.
 
 ## Rate limits
 
-The mod deliberately does not attempt to bypass RobTop server rate limits. If the game reports a cooldown, wait for that cooldown to expire before scanning again. Version 0.1.1 reduces the request burst substantially and stops after repeated download failures instead of continuing to retry.
+The mod does not bypass RobTop rate limits. Full level downloads are sequential with a 3-second pause, and the scan stops after repeated server download failures. Search-page requests are also lightly throttled.
 
-## Known limitations of v0.1.1
+## Current limitations
 
-- Recent search only; it does not crawl all historical levels.
-- It temporarily uses `GameLevelManager` level-search/download delegate slots while the scan is active and restores the previous pointers when done.
-- It compares all parsed placed objects; gameplay-vs-decoration semantic weighting is not implemented yet.
-- Section matching is greedy rather than a full sequence alignment algorithm.
-- The final popup lists IDs but does not yet provide clickable “open level” buttons.
+- Recent discovery is not global; an older copy outside the sampled pages can be missed.
+- Metadata shortlist quality depends on the server-provided object count/length/original-level fields.
+- Gameplay-vs-decoration semantic classification is not implemented yet.
+- Section matching is greedy rather than full sequence alignment.
+- Results list Level IDs but does not yet open them directly.

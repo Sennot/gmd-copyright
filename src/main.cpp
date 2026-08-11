@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <filesystem>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <thread>
@@ -21,17 +21,17 @@ using namespace geode::prelude;
 
 namespace {
 
-// Searching pages is relatively cheap; downloading every full level is not.
-// We collect a wider pool, then download only a small subset to avoid hammering
-// RobTop's servers and triggering the game's rate limiter.
-constexpr int kPagesToScan = 5;
-constexpr std::size_t kMaxCollectedCandidates = 60;
-constexpr std::size_t kMaxDownloadedCandidates = 10;
-constexpr std::size_t kMaxDisplayedResults = 5;
+// Discovery mode is still only a Recent sample, but unlike v0.1.1 we use the
+// metadata already present in search results to pick the most plausible clones.
+constexpr int kPagesToScan = 12;
+constexpr std::size_t kMaxCollectedCandidates = 120;
+constexpr std::size_t kMaxDownloadedCandidates = 14;
+constexpr std::size_t kMaxDisplayedResults = 6;
 constexpr std::size_t kMinimumSourceObjects = 8;
 constexpr int kMaxConsecutiveDownloadFailures = 2;
-constexpr double kMinimumInterestingScore = 0.40;
-constexpr auto kDownloadDelay = std::chrono::milliseconds(2500);
+constexpr double kMinimumInterestingScore = 0.42;
+constexpr auto kDownloadDelay = std::chrono::milliseconds(3000);
+constexpr auto kSearchPageDelay = std::chrono::milliseconds(350);
 
 static auto GMD_PICK_OPTIONS = file::FilePickOptions {
     std::nullopt,
@@ -49,7 +49,7 @@ std::string unpackLevelString(GJGameLevel* level) {
     std::string encoded(level->m_levelString);
     if (encoded.empty()) return {};
 
-    // GMD-API may already hand us the raw semicolon-separated object data.
+    // GMD-API may already hand us raw semicolon-separated object data.
     if (encoded.find(';') != std::string::npos && encoded.find(',') != std::string::npos) {
         return encoded;
     }
@@ -61,12 +61,17 @@ std::string unpackLevelString(GJGameLevel* level) {
 struct Candidate {
     int id = 0;
     int length = 0;
+    int objectCount = 0;
+    int originalLevel = 0;
     std::string name;
+    double metadataScore = 0.0;
 };
 
 struct ScanResult {
     int id = 0;
     std::string name;
+    int metadataObjects = 0;
+    int originalLevel = 0;
     gmdscan::SimilarityReport similarity;
 };
 
@@ -83,11 +88,7 @@ public:
 
     void start(GJGameLevel* source) {
         if (m_running) {
-            FLAlertLayer::create(
-                "GMD Similarity Scanner",
-                "A scan is already running.",
-                "OK"
-            )->show();
+            FLAlertLayer::create("GMD Similarity Scanner", "A scan is already running.", "OK")->show();
             return;
         }
 
@@ -118,6 +119,9 @@ public:
 
         m_sourceLevelID = source ? static_cast<int>(source->m_levelID) : 0;
         m_sourceLength = source ? source->m_levelLength : 0;
+        m_targetLevelID = static_cast<int>(Mod::get()->getSettingValue<int64_t>("target-level-id"));
+        m_targetedMode = m_targetLevelID > 0;
+
         m_candidates.clear();
         m_results.clear();
         m_seenIDs.clear();
@@ -135,21 +139,29 @@ public:
             return;
         }
 
-        // The game uses raw delegate pointers. Preserve anything that was there and
-        // restore it as soon as this finite scan finishes.
         m_previousLevelManagerDelegate = m_manager->m_levelManagerDelegate;
         m_previousLevelDownloadDelegate = m_manager->m_levelDownloadDelegate;
         m_manager->m_levelManagerDelegate = this;
         m_manager->m_levelDownloadDelegate = this;
         m_running = true;
 
-        Notification::create(
-            fmt::format("Scanning {} recent pages...", kPagesToScan),
-            NotificationIcon::Loading,
-            2.f
-        )->show();
-
-        requestCurrentPage();
+        if (m_targetedMode) {
+            m_candidates.push_back({m_targetLevelID, 0, 0, 0, "(target level)", 1.0});
+            Notification::create(
+                fmt::format("Comparing directly with Level ID {}...", m_targetLevelID),
+                NotificationIcon::Loading,
+                2.f
+            )->show();
+            beginDownloads();
+        }
+        else {
+            Notification::create(
+                fmt::format("Scanning {} Recent pages for metadata...", kPagesToScan),
+                NotificationIcon::Loading,
+                2.f
+            )->show();
+            requestCurrentPage();
+        }
     }
 
     void loadLevelsFinished(cocos2d::CCArray* levels, char const*) override {
@@ -183,6 +195,8 @@ public:
                     ScanResult result;
                     result.id = static_cast<int>(level->m_levelID);
                     result.name = std::string(level->m_levelName);
+                    result.metadataObjects = static_cast<int>(level->m_objectCount);
+                    result.originalLevel = static_cast<int>(level->m_originalLevel);
                     result.similarity = gmdscan::compare(m_source, fingerprint);
                     m_results.push_back(std::move(result));
                 }
@@ -205,8 +219,6 @@ public:
             m_consecutiveDownloadFailures
         );
 
-        // If the server starts rejecting downloads, stop instead of continuing to
-        // fire requests into a rate limit. We still show any results gathered so far.
         if (m_consecutiveDownloadFailures >= kMaxConsecutiveDownloadFailures) {
             m_stoppedForServerFailures = true;
             finishAndShowResults();
@@ -217,8 +229,33 @@ public:
     }
 
 private:
+    double metadataScoreFor(Candidate const& candidate) const {
+        double score = 0.0;
+
+        // If GD preserved copy ancestry, this is the strongest cheap hint available.
+        if (m_sourceLevelID > 0 && candidate.originalLevel == m_sourceLevelID) {
+            score += 10.0;
+        }
+
+        // A clone with text/background edits usually keeps nearly the same object count.
+        if (candidate.objectCount > 0 && m_source.objectCount > 0) {
+            double src = static_cast<double>(m_source.objectCount);
+            double cand = static_cast<double>(candidate.objectCount);
+            double relativeDiff = std::abs(src - cand) / std::max(src, cand);
+            score += 4.0 * std::max(0.0, 1.0 - relativeDiff * 4.0);
+        }
+
+        // Length is only a coarse category, so give it much less weight than count.
+        if (m_sourceLength > 0 && candidate.length > 0) {
+            int diff = std::abs(candidate.length - m_sourceLength);
+            score += std::max(0.0, 1.0 - static_cast<double>(diff) * 0.25);
+        }
+
+        return score;
+    }
+
     void requestCurrentPage() {
-        if (!m_running || !m_manager) return;
+        if (!m_running || !m_manager || m_targetedMode) return;
 
         if (m_currentPage >= kPagesToScan || m_candidates.size() >= kMaxCollectedCandidates) {
             beginDownloads();
@@ -240,45 +277,80 @@ private:
         m_manager->getOnlineLevels(page);
     }
 
+    void scheduleNextSearchPage() {
+        if (!m_running || m_targetedMode) return;
+        std::thread([] {
+            std::this_thread::sleep_for(kSearchPageDelay);
+            geode::queueInMainThread([] {
+                ScannerController::get().requestCurrentPage();
+            });
+        }).detach();
+    }
+
     void handleLevelsPage(cocos2d::CCArray* levels) {
-        if (!m_running) return;
+        if (!m_running || m_targetedMode) return;
 
         if (levels) {
             for (auto* level : CCArrayExt<GJGameLevel*>(levels)) {
                 if (!level) continue;
+
                 int id = static_cast<int>(level->m_levelID);
                 if (id <= 0 || id == m_sourceLevelID || m_seenIDs.contains(id)) continue;
 
+                Candidate candidate;
+                candidate.id = id;
+                candidate.length = level->m_levelLength;
+                candidate.objectCount = static_cast<int>(level->m_objectCount);
+                candidate.originalLevel = static_cast<int>(level->m_originalLevel);
+                candidate.name = std::string(level->m_levelName);
+                candidate.metadataScore = metadataScoreFor(candidate);
+
                 m_seenIDs.insert(id);
-                m_candidates.push_back({ id, level->m_levelLength, std::string(level->m_levelName) });
+                m_candidates.push_back(std::move(candidate));
                 if (m_candidates.size() >= kMaxCollectedCandidates) break;
             }
         }
 
         ++m_currentPage;
-        requestCurrentPage();
+        if (m_currentPage >= kPagesToScan || m_candidates.size() >= kMaxCollectedCandidates) {
+            beginDownloads();
+        }
+        else {
+            scheduleNextSearchPage();
+        }
     }
 
     void handleLevelsPageFailure() {
-        if (!m_running) return;
+        if (!m_running || m_targetedMode) return;
 
-        // A single bad page should not discard already collected candidates.
         ++m_currentPage;
-        requestCurrentPage();
+        if (m_currentPage >= kPagesToScan) beginDownloads();
+        else scheduleNextSearchPage();
     }
 
     void selectDownloadCandidates() {
-        if (m_candidates.size() <= kMaxDownloadedCandidates) return;
+        if (m_targetedMode) return;
 
-        // Prefer candidates with the same coarse GD length category when GMD
-        // metadata contains it. This pre-filter costs no extra network requests.
-        if (m_sourceLength > 0) {
-            std::stable_sort(m_candidates.begin(), m_candidates.end(), [this](auto const& a, auto const& b) {
-                return std::abs(a.length - m_sourceLength) < std::abs(b.length - m_sourceLength);
-            });
+        std::stable_sort(m_candidates.begin(), m_candidates.end(), [](auto const& a, auto const& b) {
+            if (a.metadataScore != b.metadataScore) return a.metadataScore > b.metadataScore;
+            return a.id > b.id; // Slight preference for newer uploads on equal metadata.
+        });
+
+        if (m_candidates.size() > kMaxDownloadedCandidates) {
+            m_candidates.resize(kMaxDownloadedCandidates);
         }
 
-        m_candidates.resize(kMaxDownloadedCandidates);
+        for (auto const& candidate : m_candidates) {
+            log::debug(
+                "Selected candidate {} '{}' objects={} length={} original={} metadata={:.3f}",
+                candidate.id,
+                candidate.name,
+                candidate.objectCount,
+                candidate.length,
+                candidate.originalLevel,
+                candidate.metadataScore
+            );
+        }
     }
 
     void beginDownloads() {
@@ -292,15 +364,17 @@ private:
         auto collected = m_candidates.size();
         selectDownloadCandidates();
 
-        Notification::create(
-            fmt::format(
-                "Found {} candidates; downloading only {} to avoid rate limits...",
-                collected,
-                m_candidates.size()
-            ),
-            NotificationIcon::Loading,
-            3.f
-        )->show();
+        if (!m_targetedMode) {
+            Notification::create(
+                fmt::format(
+                    "{} metadata candidates; comparing best {}...",
+                    collected,
+                    m_candidates.size()
+                ),
+                NotificationIcon::Loading,
+                3.f
+            )->show();
+        }
 
         m_downloadIndex = 0;
         downloadNextCandidate();
@@ -314,8 +388,6 @@ private:
             return;
         }
 
-        // Do the wait off the GD thread, then return to the main thread before
-        // touching GameLevelManager again.
         std::thread([] {
             std::this_thread::sleep_for(kDownloadDelay);
             geode::queueInMainThread([] {
@@ -340,9 +412,6 @@ private:
             candidate.id,
             candidate.name
         );
-
-        // Downloads are intentionally sequential and throttled by
-        // scheduleNextCandidate().
         m_manager->downloadLevel(candidate.id, false, 0);
     }
 
@@ -357,8 +426,6 @@ private:
     }
 
     void showScrollableResults(std::string const& body) {
-        // The long FLAlertLayer overload provides a bounded scrolling text area.
-        // This prevents the result list from growing beyond the screen.
         auto* alert = FLAlertLayer::create(
             nullptr,
             "GMD Similarity Scanner",
@@ -370,9 +437,34 @@ private:
             260.f,
             0.62f
         );
-        if (alert) {
-            alert->show();
+        if (alert) alert->show();
+    }
+
+    void appendResultLine(std::string& body, ScanResult const& result, std::size_t number = 0) const {
+        if (number > 0) {
+            body += fmt::format("\n<cy>{}. {:.1f}%</c>  {}\n", number, result.similarity.rankScore * 100.0,
+                                result.name.empty() ? "(unnamed)" : result.name);
         }
+        else {
+            body += fmt::format("\n<cy>{:.1f}%</c>  {}\n", result.similarity.rankScore * 100.0,
+                                result.name.empty() ? "(unnamed)" : result.name);
+        }
+
+        body += fmt::format(
+            "<co>ID {}</c> | overall {:.1f}% | section {:.1f}% | coverage {:.1f}%\n"
+            "objects {} vs {}",
+            result.id,
+            result.similarity.overall * 100.0,
+            result.similarity.bestSection * 100.0,
+            result.similarity.coverage * 100.0,
+            result.similarity.sourceObjects,
+            result.similarity.candidateObjects
+        );
+
+        if (m_sourceLevelID > 0 && result.originalLevel == m_sourceLevelID) {
+            body += " | <cr>GD originalLevel points to source</c>";
+        }
+        body += "\n";
     }
 
     void finishAndShowResults() {
@@ -386,79 +478,78 @@ private:
         auto stoppedForFailures = m_stoppedForServerFailures;
         auto lastError = m_lastDownloadError;
         auto sourceObjects = m_source.objectCount;
+        auto targeted = m_targetedMode;
+        auto targetID = m_targetLevelID;
 
         restoreDelegates();
         m_running = false;
 
-        std::string body = fmt::format(
-            "Source: <cy>{}</c> objects\n"
-            "Downloaded: <cy>{}</c>/<cy>{}</c>",
-            sourceObjects,
-            compared,
-            attempted
-        );
-
-        if (failures > 0) {
-            body += fmt::format("  <cr>({} failed)</c>", failures);
+        std::string body = fmt::format("Source: <cy>{}</c> parsed objects\n", sourceObjects);
+        if (targeted) {
+            body += fmt::format("Mode: <cg>exact Level ID {}</c>\n", targetID);
         }
+        else {
+            body += fmt::format(
+                "Mode: Recent discovery | metadata pool <= {}\n",
+                kMaxCollectedCandidates
+            );
+        }
+        body += fmt::format("Downloaded: <cy>{}</c>/<cy>{}</c>", compared, attempted);
+        if (failures > 0) body += fmt::format("  <cr>({} failed)</c>", failures);
         body += "\n\n";
 
         if (stoppedForFailures) {
             body += fmt::format(
-                "<cr>Stopped early after repeated server download failures</c> "
-                "(last code {}). The scanner will not keep retrying into a possible rate limit.\n\n",
+                "<cr>Stopped after repeated server failures</c> (last code {}).\n\n",
                 lastError
             );
         }
 
         if (m_results.empty()) {
-            body += "No downloadable candidates could be compared.";
+            body += "No downloadable candidate could be compared.";
+        }
+        else if (targeted) {
+            auto const& result = m_results.front();
+            if (result.similarity.rankScore >= 0.75) {
+                body += "<cr>Strong structural match</c>\n";
+            }
+            else if (result.similarity.rankScore >= kMinimumInterestingScore) {
+                body += "<cy>Moderate structural match</c>\n";
+            }
+            else {
+                body += "<cg>Low structural similarity</c>\n";
+            }
+            appendResultLine(body, result);
+            body += "\n<cl>Exact-ID mode verifies the analyzer itself and does not depend on Recent discovery.</c>";
         }
         else {
             std::vector<ScanResult const*> interesting;
             interesting.reserve(m_results.size());
             for (auto const& result : m_results) {
-                if (result.similarity.rankScore >= kMinimumInterestingScore) {
+                bool ancestryMatch = m_sourceLevelID > 0 && result.originalLevel == m_sourceLevelID;
+                if (result.similarity.rankScore >= kMinimumInterestingScore || ancestryMatch) {
                     interesting.push_back(&result);
                 }
             }
 
             if (interesting.empty()) {
                 auto const& best = m_results.front();
-                body += fmt::format(
-                    "<cg>No suspicious structural match found.</c>\n\n"
-                    "Highest weak score: <cy>{:.1f}%</c>\n"
-                    "{}  <co>ID {}</c>\n"
-                    "overall {:.1f}% | section {:.1f}% | coverage {:.1f}%",
-                    best.similarity.rankScore * 100.0,
-                    best.name.empty() ? "(unnamed)" : best.name,
-                    best.id,
-                    best.similarity.overall * 100.0,
-                    best.similarity.bestSection * 100.0,
-                    best.similarity.coverage * 100.0
-                );
+                body += "<cg>No suspicious match among the downloaded shortlist.</c>\n";
+                appendResultLine(body, best);
+                body += "\n<cl>This does NOT mean no copy exists: discovery only sampled Recent levels.</c>";
             }
             else {
-                body += "<cg>Possible structural matches</c>\n";
+                body += "<cr>Possible structural matches</c>\n";
                 std::size_t count = std::min(kMaxDisplayedResults, interesting.size());
                 for (std::size_t i = 0; i < count; ++i) {
-                    auto const& result = *interesting[i];
-                    body += fmt::format(
-                        "\n<cy>{}. {:.1f}%</c>  {}\n"
-                        "<co>ID {}</c> | overall {:.1f}% | section {:.1f}% | coverage {:.1f}%\n",
-                        i + 1,
-                        result.similarity.rankScore * 100.0,
-                        result.name.empty() ? "(unnamed)" : result.name,
-                        result.id,
-                        result.similarity.overall * 100.0,
-                        result.similarity.bestSection * 100.0,
-                        result.similarity.coverage * 100.0
-                    );
+                    appendResultLine(body, *interesting[i], i + 1);
                 }
             }
         }
 
-        body += "\n\n<cl>MVP: scans a small Recent sample, not the entire GD database.</c>";
+        if (!targeted) {
+            body += "\n<cl>Tip: set Target Level ID in mod settings to verify a known suspicious upload directly.</c>";
+        }
 
         showScrollableResults(body);
         resetState(false);
@@ -480,6 +571,8 @@ private:
         m_source = {};
         m_sourceLevelID = 0;
         m_sourceLength = 0;
+        m_targetLevelID = 0;
+        m_targetedMode = false;
         m_candidates.clear();
         m_results.clear();
         m_seenIDs.clear();
@@ -499,6 +592,8 @@ private:
     gmdscan::Fingerprint m_source;
     int m_sourceLevelID = 0;
     int m_sourceLength = 0;
+    int m_targetLevelID = 0;
+    bool m_targetedMode = false;
     int m_currentPage = 0;
     std::size_t m_downloadIndex = 0;
     std::size_t m_failedDownloads = 0;
@@ -540,11 +635,7 @@ struct $modify(GMDScannerMenuLayer, MenuLayer) {
 
     void onGMDScan(cocos2d::CCObject*) {
         if (ScannerController::get().isRunning()) {
-            FLAlertLayer::create(
-                "GMD Similarity Scanner",
-                "A scan is already running.",
-                "OK"
-            )->show();
+            FLAlertLayer::create("GMD Similarity Scanner", "A scan is already running.", "OK")->show();
             return;
         }
 

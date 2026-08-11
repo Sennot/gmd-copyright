@@ -1,50 +1,28 @@
-# Bindings/API check for Geode 5.9.0 / GD 2.2081
+# Geode / GD bindings check for v0.2.0
 
-Checked on 2026-08-11.
+Target: Geode SDK 5.9.0, Geometry Dash 2.2081 (Windows).
 
-The integration source intentionally sticks to symbols verified in the current Geode/GD 2.2081 bindings and current GMD-API source:
+Checked against the current Geode 2.2081 bindings:
 
-- `SearchType::Recent`
-- `GJSearchObject::create(SearchType)`
-- `GJSearchObject::getPageObject(int)`
-- `GameLevelManager::get()` / `getOnlineLevels(GJSearchObject*)`
+- `GameLevelManager::get()`
+- `GameLevelManager::getOnlineLevels(GJSearchObject*)`
 - `GameLevelManager::downloadLevel(int, bool, int)`
 - `GameLevelManager::m_levelManagerDelegate`
 - `GameLevelManager::m_levelDownloadDelegate`
-- both `LevelManagerDelegate::loadLevelsFinished/Failed` overload pairs
-- `LevelDownloadDelegate::levelDownloadFinished/Failed`
-- `GJGameLevel::m_levelID`, `m_levelName`, `m_levelString`
-- `SeedValueRSV::operator int()`
-- `cocos2d::ZipUtils::decompressString(...)`
-- `gmd::importGmdAsLevel(path)` from `hjfod.gmd-api` 1.5.0
-- Geode v5 async file picker + `async::TaskHolder` usage matching current GDShare patterns
+- `GJSearchObject::create(SearchType)`
+- `GJSearchObject::getPageObject(int)`
+- `SearchType::Recent`
+- `GJGameLevel::m_levelID`
+- `GJGameLevel::m_levelName`
+- `GJGameLevel::m_levelString`
+- `GJGameLevel::m_levelLength`
+- `GJGameLevel::m_objectCount`
+- `GJGameLevel::m_originalLevel`
+- both `LevelManagerDelegate::loadLevelsFinished` / `loadLevelsFailed` overload families
+- `LevelDownloadDelegate::levelDownloadFinished` / `levelDownloadFailed`
 
-## Sandbox checks performed
+The mod also uses Geode settings via `Mod::get()->getSettingValue<int64_t>()` for the optional Target Level ID.
 
-Both standalone builds below passed with warnings promoted to errors:
+Standalone comparison core was compiled and tested in the sandbox using GCC 14 and Clang 17 with C++23 and `-Werror`.
 
-```text
-g++ 14.2 / C++23 / -Wall -Wextra -Wpedantic -Werror: PASS
-clang++ 17 / C++23 / -Wall -Wextra -Wpedantic -Werror: PASS
-mod.json JSON parse: PASS
-GitHub Actions YAML parse: PASS
-```
-
-Core test output:
-
-```text
-core tests passed
-exact rank=1 changed rank=0.898462 partial rank=0.64375
-```
-
-## Limitation of the sandbox check
-
-A true Geode link/package build could not be completed in this sandbox because the Geode SDK/game import libraries are not installed in the runtime and ordinary outbound git cloning is unavailable. The source-level API/binding surface was checked against the current upstream Geode/GD bindings, and the included GitHub Actions workflow performs the authoritative Windows Geode 5.9.0 integration build.
-
-
-## v0.1.1 additions
-
-- Uses `geode::queueInMainThread` after a standard C++ sleep thread so `GameLevelManager::downloadLevel` is still called on the GD main thread.
-- Uses the long `FLAlertLayer::create(..., width, scroll, height, textScale)` overload to keep long result text inside a scrollable viewport.
-- Reads `GJGameLevel::m_levelLength` (plain `int` in 2.2081 bindings) only as a zero-cost coarse pre-filter.
-- Full downloads are capped at 10 and repeated download failures stop the scan early.
+A full Geode link/package build still requires the GitHub Actions Geode toolchain because the sandbox does not contain the installed Geometry Dash/Geode SDK import environment.
